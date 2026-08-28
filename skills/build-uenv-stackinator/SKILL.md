@@ -9,10 +9,11 @@ A uenv is a SquashFS image containing a Spack-built software stack, mounted on A
 
 ## Prerequisites
 
-- **Stackinator**: provides the `stack-config` CLI (e.g. installed at `/users/bcumming/software/stackinator`).
-- **Cluster config**: system-specific config (externals, network) in a directory, e.g. `/users/bcumming/software/alps-cluster-config/daint/`. Supplied via `-s`.
-- **Mirror config** (optional): YAML pointing at source/build caches, e.g. `/users/bcumming/software/mirrors.yaml`. Supplied via `--mirror`.
+- **Stackinator**: provides the `stack-config` CLI (e.g. installed at `/users/$USER/software/stackinator`).
+- **Cluster config**: system-specific config (externals, network) in a directory, e.g. `/users/$USER/software/alps-cluster-config/daint/`. Supplied via `-s`.
+- **Mirror config** (optional): YAML pointing at source/build caches, e.g. `/users/$USER/software/mirrors.yaml`. Supplied via `--mirror`.
 - **Build location**: must NOT be under `/tmp`, `$HOME`, or `/` (sandbox bind-mount restriction). Use `/dev/shm/$USER/build` for fast local builds.
+- If either Stackinator or Cluster config are not available, clone the repos from https://github.com/eth-cscs/stackinator or https://github.com/eth-cscs/alps-cluster-config, respectively.
 
 ## Build workflow
 
