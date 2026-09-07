@@ -48,7 +48,7 @@ vnc-tools:
   - turbovnc
   - virtualgl
   - mesa~llvm
-  - squashfs                   # needed for post-build compression
+  - squashfs                   # see note below: required despite being added internally
   views:
     vnc:
       link: run                # only link runtime files (not build deps)
@@ -61,7 +61,9 @@ Key decisions:
 - `link: run` creates a lighter view with only runtime files (no headers, static libs, build tools).
 - To ensure a package's binaries appear in the view, add it as a root spec in `specs`. Packages pulled in only as transitive dependencies may not have their binaries linked into the view.
     - determining the required root specs requires some iteration on stack-config -> make workflow.
-- `network.mpi: null` when MPI is not needed.
+- `network:` can be omitted entirely when MPI is not needed; it defaults to `{mpi: null, specs: null}`.
+- **List `squashfs` in `specs` anyway**, even though Stackinator adds it to its own internal `uenv_tools` spec group. That internal copy is `explicit: false`, so the `cleanup` make target's `spack gc` uninstalls it again, and the image step then falls back to a bare `/bin/mksquashfs` that does not exist (`env: '/bin/mksquashfs': No such file or directory`). Listing it makes it an explicit root that survives gc. Add `exclude: [squashfs]` to the view so it does not reach users.
+- `specs` may not be empty. An empty list passes Stackinator's schema but renders as `specs: null` in `env/spack.yaml`, which Spack rejects with `is not valid under any of the given schemas`. An image whose content comes from `post-install` still needs at least one spec.
 - Avoid including MPI or compilers in `specs` — they are handled separately (inspect the generated `env/spack.yaml` file in the build directory.
     - it may be neccessary in some corner cases
 

@@ -7,13 +7,97 @@ description: Build a uenv (SquashFS software-stack image) on Alps HPC systems us
 
 A uenv is a SquashFS image containing a Spack-built software stack, mounted on Alps HPC nodes. Stackinator turns a *recipe* plus a *cluster config* into a build directory, then orchestrates the Spack build inside a bubblewrap sandbox.
 
+## A uenv image is just a SquashFS file
+
+`store.squashfs` is an ordinary SquashFS archive whose filesystem root becomes the mount point. Nothing about it is uenv-specific except one metadata file, and nothing requires its contents to have come from Spack.
+
+```bash
+unsquashfs -l store.squashfs             # list contents, no mount needed
+unsquashfs -d out store.squashfs meta    # extract a single path
+mksquashfs <dir> image.squashfs          # build one by hand
+```
+
+At the root of the image — i.e. at the mount point:
+
+| Path | What it is |
+|---|---|
+| `meta/env.json` | the only file `uenv` itself reads: `name`, `description`, `mount`, `views`, `modules` |
+| `meta/recipe/` | a copy of the recipe that built the image |
+| `env/<view>/` | the views: `bin`, `lib`, … symlink farms that land on the user's `PATH` |
+| `linux-<uarch>/` | the Spack install prefixes |
+| `.spack-db/` | the Spack database describing them |
+
+Three consequences worth knowing:
+
+- **The mount point is baked into the contents.** Spack writes absolute prefixes and RPATHs, so the build-time `store:` must equal the runtime mount point. `store:` is a real decision, not a label — and with `mount_specific: true` it also selects which build cache is warm.
+- **Mounting is separate from uenv.** `uenv start` / `uenv run` are conveniences over `squashfs-mount`, a setuid helper that mounts images at arbitrary paths in a new mount namespace:
+  ```bash
+  squashfs-mount -s store.squashfs:/user-tools -- bash
+  ```
+  (In squashfs-mount 10, images go in `-s`; positional arguments are the command to run.)
+- **The contents do not have to come from Spack.** A `post-install` hook can put anything into the store — unpacked RPMs, extracted tarballs, wrapper scripts — provided it works when mounted at `store:`. Spack is the usual way to fill a uenv, not a property of the format. This is the route for software Spack does not package.
+
+**A uenv session is a one-way door.** `squashfs-mount` sets `PR_SET_NO_NEW_PRIVS` before handing control back (symbol `return_to_user_and_no_new_privs`), which permanently disables setuid for that process tree. So inside a uenv session nothing can mount another image — `uenv start`/`uenv run` refuse outright (*"a uenv session is already running"*), and `squashfs-mount`, `squashfuse` and rootless `podman` all fail with permission errors. Two images have to be requested together at session start, at different mount points:
+
+```bash
+uenv start prgenv-gnu/24.7:v3,editors/24.7:v1     # /user-environment + /user-tools
+```
+
+This matters when designing an image whose software launches other software: an application started from inside a uenv session cannot itself start a uenv. If users must be able to load a uenv *from* the tool, the tool's image has to be mounted outside a session — at boot, like `/mch-environment` — rather than started with `uenv start`.
+
 ## Prerequisites
 
-- **Stackinator**: provides the `stack-config` CLI (e.g. installed at `/users/$USER/software/stackinator`).
-- **Cluster config**: system-specific config (externals, network) in a directory, e.g. `/users/$USER/software/alps-cluster-config/daint/`. Supplied via `-s`.
-- **Mirror config** (optional): YAML pointing at source/build caches, e.g. `/users/$USER/software/mirrors.yaml`. Supplied via `--mirror`.
-- **Build location**: must NOT be under `/tmp`, `$HOME`, or `/` (sandbox bind-mount restriction). Use `/dev/shm/$USER/build` for fast local builds.
-- If either Stackinator or Cluster config are not available, clone the repos from https://github.com/eth-cscs/stackinator or https://github.com/eth-cscs/alps-cluster-config, respectively.
+- **Stackinator** — provides `stack-config`. No install step: run `stackinator/bin/stack-config` directly; it bootstraps its own dependencies with `uv` on first use.
+- **Cluster config** — per-vCluster system externals and network config, passed with `-s`.
+- **Recipe** — the directory of YAML described below, passed with `-r`.
+- **`mirrors.yaml`** — source and build caches, passed with `--mirror`. Optional, but a cold build cache means building everything from source.
+- **Build directory** — must NOT be under `/tmp`, `$HOME`, or `/` (sandbox bind-mount restriction). `/dev/shm/$USER/build` is fast and works.
+
+## Setting up a build from scratch
+
+When nothing is set up yet, put the three repos, the recipe and the mirror config in one working directory:
+
+```bash
+mkdir -p ~/work/<project> && cd ~/work/<project>
+git clone https://github.com/eth-cscs/stackinator.git            # stack-config
+git clone https://github.com/eth-cscs/alps-cluster-config.git    # -s argument
+git clone https://github.com/eth-cscs/alps-uenv.git              # recipes to crib from
+```
+
+**Pick the cluster config**: `alps-cluster-config/<cluster>`, where `<cluster>` is `$CLUSTER_NAME` — also the `system` column of `uenv image ls`.
+
+**Start from an existing recipe, not a blank one.** Copy a `prgenv-gnu` recipe and delete everything the new image does not need; it inherits choices already known to work on Alps:
+
+```bash
+mkdir -p recipes/<name>
+cp alps-uenv/recipes/prgenv-gnu/<version>/<uarch>/{config,compilers,environments}.yaml recipes/<name>/
+```
+
+Match `<uarch>` to the target system (`gh200`, `a100`, `mc`, `amdgpu`). Then strip hard — for a stack that needs neither MPI nor GPU:
+
+- `config.yaml` — set `name`, `store` (the mount point), `description`, `version: 3`. Set `default-view` only when one view is obviously the one to load.
+- `compilers.yaml` — `gcc: version: "system"` unless the image must build another compiler. This skips a full gcc bootstrap and is a large saving.
+- `environments.yaml` — delete the whole `network:` block (it defaults to no MPI), delete `variants:` (`+mpi`, `+cuda`, `cuda_arch=`), and cut `specs:` to what the image is actually for.
+- Delete `modules.yaml` unless users will `module load`, and delete `extra/`.
+
+**Write `mirrors.yaml`.** Find the existing cache in `$SCRATCH` — it is the directory containing a `push-key.gpg`:
+
+```bash
+find $SCRATCH -maxdepth 3 -name 'push-key.gpg' 2>/dev/null
+```
+
+```yaml
+buildcache:
+  url: /scratch/<...>/uenv-cache          # a `file://` URL is also accepted
+  private_key: /scratch/<...>/uenv-cache/push-key.gpg
+  mount_specific: true
+sourcecache:
+  path: /scratch/<...>/uenv-cache
+```
+
+`mount_specific: true` partitions the build cache **by mount point** (`<cache>/user-tools` vs `<cache>/user-environment`). Choosing a `store:` that the cache has never been built for gives a cold cache and a full from-source build — expect it, or reuse the mount point the cache was filled for.
+
+Confirm the caches were actually wired up before starting a long build: `config/mirrors.yaml` and `config/config.yaml` in the build directory should name them.
 
 ## Build workflow
 
@@ -58,10 +142,12 @@ Keep it concise and factual — it is a build log for the next person (or the ne
 
 ### Iterating
 
-Edit recipe YAML → re-run `stack-config` → re-run `make store.squashfs`. Individual targets speed up iteration:
-- `make concretize` — resolve dependencies only (check concretization).
-- `make install` — build packages.
-- `make store.squashfs` — package the image.
+Edit recipe YAML → re-run `stack-config` → re-run `make store.squashfs`. Re-running `stack-config` over an existing build directory is safe: it regenerates the config and updates the cloned Spack repos in place.
+
+Individual targets speed up iteration:
+- `make env/spack.lock` — concretize only; the fast check that the specs resolve. **There is no `make concretize` target.**
+- `make install` — build the packages.
+- `make store.squashfs` — package the image (the default target).
 
 For rapid prototyping (e.g. testing a script change), edit files directly in the store path (`$BUILD/store/`) and re-run `make store.squashfs` — repackaging takes seconds. Once validated, implement the change properly in the recipe (post-install hook, custom package, etc.).
 
@@ -97,6 +183,10 @@ Provided via `-s`; not authored per-recipe but must be understood:
 - **Concretization failures**: conflicting package requirements. Try `unify: when_possible` or adjust variant flags.
 - **Missing externals**: if Spack builds something that should come from the system, add it to the recipe `packages.yaml` with `buildable: false`.
 - **Build path restrictions**: cannot use `/tmp`, `$HOME`, or `/`.
+- **`Error: cannot concretize 'X', since 'X' does not exist`**: the pinned `spack.packages.commit` in `config.yaml` predates the package. Check the package exists at that commit (`ls repos/builtin/repos/spack_repo/builtin/packages/<X>` in the build directory) and bump the commit if not.
+- **Everything rebuilds from source**: the build cache is keyed by mount point when `mount_specific: true`. A new `store:` value has no cache behind it. `no binary available` for packages you know are cached is the tell.
+- **`env: '/bin/mksquashfs': No such file or directory`** at the image step: `spack gc` in the `cleanup` target has uninstalled the `squashfs` package that Stackinator added internally, because it is not an explicit root (look for `Successfully uninstalled squashfs` earlier in the log). The path in the recipe collapses to `/bin/mksquashfs`, which does not exist. Add `squashfs` to the environment's `specs` and `exclude` it from the view.
+- **`specs: null ... is not valid under any of the given schemas`**: the environment has an empty `specs` list. Stackinator accepts it; Spack does not. Give the environment at least one spec.
 - **Large images**: use `cleanup: runtime` (config.yaml), `link: run` in views, and avoid heavy deps (e.g. `mesa~llvm` to skip LLVM).
 - **Custom-package post-install steps must be idempotent**: Stackinator builds a package, pushes it to the build cache, then reinstalls it from the cache — so a custom package's `@run_after("install")` file mutation (and other install-time file edits) can run *more than once* on the same prefix. A non-idempotent in-place edit (appending a block, injecting an rpath line) corrupts the file on the second pass, and the failure surfaces far downstream. Regenerate from a preserved pristine copy, or guard so re-application is a no-op.
 

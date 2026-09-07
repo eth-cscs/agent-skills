@@ -4,6 +4,8 @@ An agent skill for building [uenv][https://docs.cscs.ch/software/uenv] software-
 
 ## What it covers
 
+- **Setting up from scratch** — the working directory, the three repos to clone, cribbing a recipe from `alps-uenv`, and writing `mirrors.yaml`.
+- **The image format** — a uenv is an ordinary SquashFS file; what is inside one, and why the mount point is baked into its contents.
 - **The build workflow** — configure with `stack-config`, build with `make store.squashfs`, and the fast iteration loop for prototyping changes.
 - **Build notes convention** — read a recipe's `README.md` for prior gotchas before building, and record hard-won findings there after a successful build.
 - **Debugging** — where sandbox log files really live, how to get a debug shell (`stack-debug.sh`), and how to inspect the store before repackaging.
